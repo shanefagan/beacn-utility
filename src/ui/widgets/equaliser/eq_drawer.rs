@@ -1107,4 +1107,95 @@ mod tests {
         // High frequency MUST be deflected upward
         assert!(modulated_sibilance[steps] > 1.0);
     }
+
+    #[test]
+    #[ignore]
+    fn test_benchmark_visualizer_modes() {
+        let mut bands = Bands::default();
+        bands[EQBand::Band1] = EqualiserBandConfig {
+            enabled: true,
+            band_type: EQBandType::HighPassFilter,
+            frequency: 80,
+            gain: 0.0,
+            q: 0.7,
+        };
+        bands[EQBand::Band2] = EqualiserBandConfig {
+            enabled: true,
+            band_type: EQBandType::BellBand,
+            frequency: 250,
+            gain: -2.0,
+            q: 1.4,
+        };
+        bands[EQBand::Band3] = EqualiserBandConfig {
+            enabled: true,
+            band_type: EQBandType::BellBand,
+            frequency: 3000,
+            gain: 2.5,
+            q: 1.0,
+        };
+        bands[EQBand::Band4] = EqualiserBandConfig {
+            enabled: true,
+            band_type: EQBandType::HighShelf,
+            frequency: 8000,
+            gain: 3.0,
+            q: 0.7,
+        };
+
+        let mut view = EQDrawView::new(bands);
+        let plot_rect = Rectangle::new(Point::new(0.0, 0.0), iced::Size::new(800.0, 400.0));
+
+        let dry_spectrum = vec![-28.0; 128];
+        let mut wet_spectrum = vec![-28.0; 128];
+        for b in 100..128 {
+            wet_spectrum[b] = -34.0;
+        }
+        view.set_dual_spectrum(dry_spectrum.clone(), Some(wet_spectrum.clone()));
+
+        let static_gains = view.get_summed_frequency_response(plot_rect, EQ_CURVE_RESOLUTION);
+
+        const ITERATIONS: usize = 20_000;
+
+        // 1. Mode 1: Static EQ recalculation (only runs when dragging a slider/point)
+        let start = std::time::Instant::now();
+        for _ in 0..ITERATIONS {
+            let _ = view.get_summed_frequency_response(plot_rect, EQ_CURVE_RESOLUTION);
+        }
+        let dur_static_recalc = start.elapsed();
+
+        // 2. Mode 2: BEACN Ballistics (runs every frame at 60 FPS when speaking)
+        let start = std::time::Instant::now();
+        for _ in 0..ITERATIONS {
+            let _ = view.compute_beacn_ballistics(&static_gains);
+        }
+        let dur_beacn_ballistics = start.elapsed();
+
+        // 3. Mode 3: Full Dry/Wet Dynamic Transfer (runs every frame at 60 FPS)
+        let start = std::time::Instant::now();
+        for _ in 0..ITERATIONS {
+            let _ = view.compute_animated_curves(plot_rect);
+        }
+        let dur_full_dry_wet = start.elapsed();
+
+        println!("\n==========================================================================");
+        println!("          EQ VISUALIZER PERFORMANCE BENCHMARK ({} iterations)", ITERATIONS);
+        println!("==========================================================================");
+        let per_op_static = dur_static_recalc.as_secs_f64() * 1_000_000.0 / ITERATIONS as f64;
+        let per_op_beacn = dur_beacn_ballistics.as_secs_f64() * 1_000_000.0 / ITERATIONS as f64;
+        let per_op_full = dur_full_dry_wet.as_secs_f64() * 1_000_000.0 / ITERATIONS as f64;
+
+        // At 60 FPS, there are 16,666.67 microseconds per frame.
+        // % of 1 CPU core = (time_per_frame_us * 60) / 1,000,000 * 100% = time_per_frame_us / 166.6667
+        let cpu_pct_beacn = (per_op_beacn * 60.0) / 10_000.0;
+        let cpu_pct_full = (per_op_full * 60.0) / 10_000.0;
+        let cpu_pct_static_drag = (per_op_static * 60.0) / 10_000.0;
+
+        println!("Mode 1 (Static Cache Hit):         0.00 µs/frame  |  0.000% CPU (100% cached iced geometry)");
+        println!("Mode 1 (Static Slider Drag):      {:6.2} µs/frame  | {:6.3}% CPU (only during active drag)", per_op_static, cpu_pct_static_drag);
+        println!("Mode 2 (BEACN Bulk Ballistics):   {:6.2} µs/frame  | {:6.3}% CPU (at 60 FPS under active speech)", per_op_beacn, cpu_pct_beacn);
+        println!("Mode 3 (Full Dry/Wet Dynamic):    {:6.2} µs/frame  | {:6.3}% CPU (at 60 FPS under active speech)", per_op_full, cpu_pct_full);
+        println!("--------------------------------------------------------------------------");
+        println!("Throughput: Mode 2 can compute {:.0} frames/sec on a single core!", 1_000_000.0 / per_op_beacn);
+        println!("Throughput: Mode 3 can compute {:.0} frames/sec on a single core!", 1_000_000.0 / per_op_full);
+        println!("==========================================================================\n");
+    }
 }

@@ -280,4 +280,36 @@ mod tests {
             "Expected ~2.8 dB decay over 0.1s, got {decay} dB"
         );
     }
+
+    #[test]
+    #[ignore]
+    fn test_benchmark_spectrum_analyzer() {
+        let sample_rate = 48000.0;
+        let mut analyzer = DynamicSpectrumAnalyzer::new(sample_rate);
+        let mut output_db = vec![MIN_DB; EQ_CURVE_RESOLUTION];
+        let audio_block = vec![0.25_f32; 256];
+
+        const ITERATIONS: usize = 50_000;
+
+        let start = std::time::Instant::now();
+        for _ in 0..ITERATIONS {
+            analyzer.push_incoming_samples(&audio_block);
+            analyzer.render_spectrum_frame(&mut output_db, audio_block.len());
+        }
+        let elapsed = start.elapsed();
+
+        let per_op_us = elapsed.as_secs_f64() * 1_000_000.0 / ITERATIONS as f64;
+        let cpu_pct_pipewire_stream = (per_op_us * 187.5) / 10_000.0;
+        let cpu_pct_60fps = (per_op_us * 60.0) / 10_000.0;
+
+        println!("\n==========================================================================");
+        println!("          SPECTRUM FFT ANALYZER BENCHMARK ({} iterations)", ITERATIONS);
+        println!("==========================================================================");
+        println!("FFT + Log Binning Execution:      {:6.2} µs / buffer", per_op_us);
+        println!("CPU % (Continuous 48kHz audio):   {:6.3}% CPU of 1 core (187.5 buffers/sec)", cpu_pct_pipewire_stream);
+        println!("CPU % (60 FPS visualizer tick):   {:6.3}% CPU of 1 core (60 frames/sec)", cpu_pct_60fps);
+        println!("Single-Core FFT Throughput:       {:.0} buffers/sec", 1_000_000.0 / per_op_us);
+        println!("==========================================================================\n");
+    }
 }
+
