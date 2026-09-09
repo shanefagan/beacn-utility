@@ -11,7 +11,7 @@ use crate::ui::widgets::equaliser::eq_util::{BiquadCoefficient, EQUtil};
 pub enum EqVisualizerMode {
     /// Static EQ visualization (original upstream behavior)
     Static,
-    /// Official BEACN software style: ballistics modulate the low (bass) and high (sibilance) ends of the main curve
+    /// BEACN-style dynamic ballistics: vocal activity deflects the low and high extremes of the curve
     #[default]
     BeacnBallistics,
 }
@@ -58,7 +58,7 @@ fn eq_point_colour(index: usize) -> Color {
     Color::from_rgb8(r, g, b)
 }
 
-/// BEACN frequency guide zone definition
+/// Vocal frequency guide zone definition (inspired by the BEACN app's vocal frequency zones)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EqGuideZone {
     pub label: &'static str,
@@ -156,13 +156,11 @@ pub struct EQDrawView {
     // Visualizer Mode
     visualizer_mode: EqVisualizerMode,
 
-    // Guide mode showing official BEACN vocal frequency blocks
+    // Guide mode showing vocal frequency reference zones
     show_guide: bool,
 
     // Spectrum Data points
     spectrum_bins: Vec<f32>,
-    dry_spectrum_bins: Vec<f32>,
-    wet_spectrum_bins: Vec<f32>,
 }
 
 impl Default for EQDrawView {
@@ -188,8 +186,6 @@ impl EQDrawView {
             visualizer_mode: EqVisualizerMode::BeacnBallistics,
             show_guide: true,
             spectrum_bins: vec![],
-            dry_spectrum_bins: vec![],
-            wet_spectrum_bins: vec![],
         }
     }
 
@@ -231,7 +227,7 @@ impl EQDrawView {
         next
     }
 
-    /// Whether the BEACN frequency guide blocks and labels are shown
+    /// Whether the frequency guide blocks and labels are shown
     #[allow(dead_code)]
     pub fn show_guide(&self) -> bool {
         self.show_guide
@@ -275,13 +271,7 @@ impl EQDrawView {
     }
 
     pub fn set_spectrum(&mut self, data: Vec<f32>) {
-        self.set_dual_spectrum(data, None);
-    }
-
-    pub fn set_dual_spectrum(&mut self, dry: Vec<f32>, wet: Option<Vec<f32>>) {
-        self.spectrum_bins = dry.clone();
-        self.dry_spectrum_bins = dry;
-        self.wet_spectrum_bins = wet.unwrap_or_default();
+        self.spectrum_bins = data;
         self.spectrum_cache.clear();
         if self.visualizer_mode != EqVisualizerMode::Static {
             self.curve_cache.clear();
@@ -289,9 +279,7 @@ impl EQDrawView {
     }
 
     pub fn clear_spectrum(&mut self) {
-        self.spectrum_bins = vec![];
-        self.dry_spectrum_bins = vec![];
-        self.wet_spectrum_bins = vec![];
+        self.spectrum_bins.clear();
         self.spectrum_cache.clear();
         if self.visualizer_mode != EqVisualizerMode::Static {
             self.curve_cache.clear();
@@ -338,7 +326,7 @@ impl EQDrawView {
         frame.fill_rectangle(plot_rect.position(), plot_rect.size(), background);
 
         if self.show_guide {
-            // Alternating vertical column shading matching official BEACN software
+            // Alternating vertical column shading for vocal frequency zones
             for zone in &EQ_GUIDE_ZONES {
                 let x_start = EqGeometry::freq_to_x(zone.min_freq, plot_rect)
                     .clamp(plot_rect.x, plot_rect.x + plot_rect.width);
@@ -473,11 +461,12 @@ impl EQDrawView {
         }
     }
 
-    /// Official BEACN hardware visualizer effect:
+    /// BEACN-style vocal visualizer effect:
     /// Measures bulk energy in the low band (bass / plosives / fundamental vocal body)
     /// and high band (sibilance / breath / air), and dynamically deflects only the
-    /// low (< 240 Hz) and high (> 3 kHz) ends of the main curve, while keeping the
-    /// midrange (240 Hz - 3 kHz) rock-solid on the dialed-in EQ target.
+    /// low (< 240 Hz) and high (> 3 kHz) ends of the curve to reflect vocal activity,
+    /// while keeping the midrange (240 Hz - 3 kHz) rock-solid on the dialed-in EQ target.
+    /// (Note: This is an independent open-source recreation inspired by BEACN software).
     pub fn compute_beacn_ballistics(&self, gains: &[f32]) -> Vec<f32> {
         if gains.is_empty() || self.spectrum_bins.is_empty() {
             return gains.to_vec();
@@ -1113,12 +1102,8 @@ mod tests {
         let mut view = EQDrawView::new(bands);
         let plot_rect = Rectangle::new(Point::new(0.0, 0.0), iced::Size::new(800.0, 400.0));
 
-        let dry_spectrum = vec![-28.0; 128];
-        let mut wet_spectrum = vec![-28.0; 128];
-        for b in 100..128 {
-            wet_spectrum[b] = -34.0;
-        }
-        view.set_dual_spectrum(dry_spectrum.clone(), Some(wet_spectrum.clone()));
+        let spectrum = vec![-28.0; 128];
+        view.set_spectrum(spectrum);
 
         let static_gains = view.get_summed_frequency_response(plot_rect, EQ_CURVE_RESOLUTION);
 
@@ -1131,7 +1116,7 @@ mod tests {
         }
         let dur_static_recalc = start.elapsed();
 
-        // 2. Mode 2: BEACN Ballistics (runs every frame at 60 FPS when speaking)
+        // 2. Mode 2: BEACN-style Ballistics (runs every frame at 60 FPS when speaking)
         let start = std::time::Instant::now();
         for _ in 0..ITERATIONS {
             let _ = view.compute_beacn_ballistics(&static_gains);
@@ -1150,7 +1135,7 @@ mod tests {
 
         println!("Mode 1 (Static Cache Hit):         0.00 µs/frame  |  0.000% CPU (100% cached iced geometry)");
         println!("Mode 1 (Static Slider Drag):      {:6.2} µs/frame  | {:6.3}% CPU (only during active drag)", per_op_static, cpu_pct_static_drag);
-        println!("Mode 2 (BEACN Bulk Ballistics):   {:6.2} µs/frame  | {:6.3}% CPU (at 60 FPS under active speech)", per_op_beacn, cpu_pct_beacn);
+        println!("Mode 2 (BEACN-style Ballistics):  {:6.2} µs/frame  | {:6.3}% CPU (at 60 FPS under active speech)", per_op_beacn, cpu_pct_beacn);
         println!("--------------------------------------------------------------------------");
         println!("Throughput: Mode 2 can compute {:.0} frames/sec on a single core!", 1_000_000.0 / per_op_beacn);
         println!("==========================================================================\n");

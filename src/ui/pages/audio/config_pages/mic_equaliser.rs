@@ -638,12 +638,8 @@ impl MicEqualiser {
         self.eq_mode = mode;
     }
 
-    #[allow(unused)]
     pub(crate) fn set_spectrum_data(&mut self, data: Vec<f32>) {
         self.view.set_spectrum(data);
-    }
-    pub(crate) fn set_dual_spectrum_data(&mut self, dry: Vec<f32>, wet: Option<Vec<f32>>) {
-        self.view.set_dual_spectrum(dry, wet);
     }
     pub(crate) fn clear_spectrum_data(&mut self) {
         self.view.clear_spectrum();
