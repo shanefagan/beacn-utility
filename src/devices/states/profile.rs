@@ -242,7 +242,6 @@ impl ProfileManager {
                 if !snap_file.exists() {
                     let _ = Self::save_snapshots(name, &Snapshots::default());
                 }
-
                 if profile_file.exists() && !is_outdated_default {
                     continue;
                 }

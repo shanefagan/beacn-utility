@@ -298,7 +298,6 @@ impl MicEqualiser {
         let gain = EQGain(0.0);
         let q = EQQ(0.7);
 
-        // All 0dB gain bands for a flat line default
         let mut messages = vec![
             Message::EQMicrophone(EQMicrophone::Enabled(mode, EQBand::Band1, true)),
             Message::EQMicrophone(EQMicrophone::Enabled(mode, EQBand::Band2, true)),
@@ -634,7 +633,7 @@ impl MicEqualiser {
         row.into()
     }
 
-    // Gives us an opportunity to prepare for a new device or profile
+    // Gives us an oppertunity to prepare for a new device
     pub(crate) fn load_device(&mut self, state: &AudioState) {
         let mode = state.eq_microphone.mode;
         let bands = state.eq_microphone.bands[state.eq_microphone.mode];
