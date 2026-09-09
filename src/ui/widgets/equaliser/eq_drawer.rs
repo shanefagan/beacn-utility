@@ -232,6 +232,7 @@ impl EQDrawView {
     }
 
     /// Whether the BEACN frequency guide blocks and labels are shown
+    #[allow(dead_code)]
     pub fn show_guide(&self) -> bool {
         self.show_guide
     }
