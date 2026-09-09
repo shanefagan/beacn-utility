@@ -51,11 +51,50 @@ pub struct Args {
     /// Launch in the background, without opening the UI
     #[arg(long, alias = "startup")]
     pub background: bool,
+
+    /// Switch active microphone profile
+    #[arg(long, value_name = "PROFILE")]
+    pub profile: Option<String>,
+
+    /// List all available profiles and exit
+    #[arg(long = "list-profiles")]
+    pub list_profiles: bool,
+
+    /// Reload the active profile from disk
+    #[arg(long)]
+    pub reload: bool,
+
+    /// Set analog microphone preamp gain in dB
+    #[arg(long = "set-gain", value_name = "DB")]
+    pub set_gain: Option<u8>,
+
+    /// Set an EQ band: <BAND 1-9> <SHAPE> <FREQ_HZ> <GAIN_DB> <Q>
+    #[arg(
+        long = "set-eq-band",
+        num_args = 5,
+        value_names = ["BAND", "SHAPE", "FREQ", "GAIN", "Q"]
+    )]
+    pub set_eq_band: Option<Vec<String>>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+
+    if args.list_profiles {
+        crate::devices::states::profile::ProfileManager::ensure_default_profiles();
+        let profiles = crate::devices::states::profile::ProfileManager::list_profiles();
+        let active = crate::devices::states::profile::ProfileManager::get_active_profile_name();
+        println!("Available Profiles ({}):", profiles.len());
+        for p in &profiles {
+            if p == &active {
+                println!("  * {p} [active]");
+            } else {
+                println!("    {p}");
+            }
+        }
+        return Ok(());
+    }
 
     println!("Initialising Logging...");
     #[cfg(not(target_arch = "wasm32"))]
@@ -146,7 +185,18 @@ async fn main() -> Result<()> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         use crate::managers::ipc::handle_active_instance;
-        if handle_active_instance().await {
+        if handle_active_instance(&args).await {
+            return Ok(());
+        }
+
+        // If no instance was running, handle offline actions if specific CLI arguments were passed
+        if let Some(ref name) = args.profile {
+            crate::devices::states::profile::ProfileManager::set_active_profile_name(name)?;
+            println!("Set active profile to '{name}' (offline mode)");
+            return Ok(());
+        }
+        if args.reload || args.set_gain.is_some() || args.set_eq_band.is_some() {
+            eprintln!("No active beacn-utility instance running to receive command.");
             return Ok(());
         }
     }
@@ -474,4 +524,14 @@ pub enum ManagerMessages {
 pub enum WindowMessage {
     OpenWindow,
     Quit,
+    SwitchProfile(String),
+    ReloadProfile,
+    SetGain(u8),
+    SetEqBand {
+        band: beacn_lib::audio::messages::eq_common::EQBand,
+        band_type: beacn_lib::audio::messages::eq_common::EQBandType,
+        frequency: f32,
+        gain: f32,
+        q: f32,
+    },
 }

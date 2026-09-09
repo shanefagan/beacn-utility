@@ -12,13 +12,17 @@ use crate::ui::widgets::helpers::navigation::{
     pipeweaver_sidebar_item, round_nav_button, settings_sidebar_item,
 };
 use crate::{APP_TITLE, WindowMessage};
+use beacn_lib::audio::messages::Message as AudioMsg;
+use beacn_lib::audio::messages::eq_common::{EQBand, EQBandType, EQFrequency, EQGain, EQQ};
+use beacn_lib::audio::messages::eq_microphone::EQMicrophone;
+use beacn_lib::audio::messages::mic_setup::{MicGain, MicSetup, StudioMicGain};
 use beacn_lib::flume::Receiver;
 use beacn_lib::manager::{DeviceLocation, DeviceType};
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{Space, column, container, row, rule, text};
 use iced::{Alignment, Element, Length, Size, Subscription, Task, Theme, time, window};
 use iced_futures::subscription::from_recipe;
-use log::debug;
+use log::{debug, info, warn};
 use std::collections::HashMap;
 use web_time::Duration;
 
@@ -77,13 +81,28 @@ pub(crate) enum Message {
     Settings(SettingsMessage),
 
     // Page Selection
-    SelectDeviceAndPage { device_id: String, page_id: usize },
+    SelectDeviceAndPage {
+        device_id: String,
+        page_id: usize,
+    },
 
     // Messages that are passed to the current page
     Page(PageMessage),
 
     // A ticker than runs at 30FPS
     Tick,
+
+    // IPC & CLI commands
+    SwitchProfile(String),
+    ReloadProfile,
+    SetGain(u8),
+    SetEqBand {
+        band: EQBand,
+        band_type: EQBandType,
+        frequency: f32,
+        gain: f32,
+        q: f32,
+    },
 
     // Window Related Tasks
     Quit,
@@ -318,6 +337,100 @@ impl BeacnUtility {
                     .map(Message::Page);
             }
 
+            Message::SwitchProfile(name) => {
+                for device in self.devices.values_mut() {
+                    if let DeviceState::Audio(ref mut state) = device.state {
+                        if let Err(e) = state.switch_profile(&name) {
+                            warn!("Failed to switch profile to '{name}': {e}");
+                        } else {
+                            info!("Switched active profile to '{name}'");
+                        }
+                    }
+                    if let Some(active_page) = self.active_page {
+                        device.pages[active_page].on_open_fn(&mut device.state);
+                    }
+                }
+                return Task::none();
+            }
+
+            Message::ReloadProfile => {
+                for device in self.devices.values_mut() {
+                    if let DeviceState::Audio(ref mut state) = device.state {
+                        let active_name = state.active_profile_name.clone();
+                        if let Err(e) = state.switch_profile(&active_name) {
+                            warn!("Failed to reload profile '{active_name}': {e}");
+                        } else {
+                            info!("Reloaded active profile '{active_name}' from disk");
+                        }
+                    }
+                    if let Some(active_page) = self.active_page {
+                        device.pages[active_page].on_open_fn(&mut device.state);
+                    }
+                }
+                return Task::none();
+            }
+
+            Message::SetGain(gain) => {
+                for device in self.devices.values_mut() {
+                    if let DeviceState::Audio(ref mut state) = device.state {
+                        let msg = match state.device_definition.device_type {
+                            DeviceType::BeacnMic => {
+                                AudioMsg::MicSetup(MicSetup::MicGain(MicGain(gain as u32)))
+                            }
+                            DeviceType::BeacnStudio => AudioMsg::MicSetup(MicSetup::StudioMicGain(
+                                StudioMicGain(gain as u32),
+                            )),
+                            _ => continue,
+                        };
+                        if let Err(e) = state.handle_message(msg) {
+                            warn!("Failed to set mic gain to {gain} dB: {e}");
+                        } else {
+                            info!("Set mic gain to {gain} dB");
+                            state.save_active_profile();
+                        }
+                    }
+                    if let Some(active_page) = self.active_page {
+                        device.pages[active_page].on_open_fn(&mut device.state);
+                    }
+                }
+                return Task::none();
+            }
+
+            Message::SetEqBand {
+                band,
+                band_type,
+                frequency,
+                gain,
+                q,
+            } => {
+                for device in self.devices.values_mut() {
+                    if let DeviceState::Audio(ref mut state) = device.state {
+                        let mode = state.eq_microphone.mode;
+                        let msgs = [
+                            AudioMsg::EQMicrophone(EQMicrophone::Type(mode, band, band_type)),
+                            AudioMsg::EQMicrophone(EQMicrophone::Frequency(
+                                mode,
+                                band,
+                                EQFrequency(frequency),
+                            )),
+                            AudioMsg::EQMicrophone(EQMicrophone::Gain(mode, band, EQGain(gain))),
+                            AudioMsg::EQMicrophone(EQMicrophone::Q(mode, band, EQQ(q))),
+                            AudioMsg::EQMicrophone(EQMicrophone::Enabled(mode, band, true)),
+                        ];
+                        for msg in msgs {
+                            if let Err(e) = state.handle_message(msg) {
+                                warn!("Failed to apply EQ band message: {e}");
+                            }
+                        }
+                        state.save_active_profile();
+                    }
+                    if let Some(active_page) = self.active_page {
+                        device.pages[active_page].on_open_fn(&mut device.state);
+                    }
+                }
+                return Task::none();
+            }
+
             Message::Quit => {
                 // Trigger the page on_close callback before we quit.
                 //
@@ -516,6 +629,22 @@ impl BeacnUtility {
             map_fn: |msg| match msg {
                 WindowMessage::OpenWindow => Message::WindowOpen,
                 WindowMessage::Quit => Message::Quit,
+                WindowMessage::SwitchProfile(name) => Message::SwitchProfile(name),
+                WindowMessage::ReloadProfile => Message::ReloadProfile,
+                WindowMessage::SetGain(gain) => Message::SetGain(gain),
+                WindowMessage::SetEqBand {
+                    band,
+                    band_type,
+                    frequency,
+                    gain,
+                    q,
+                } => Message::SetEqBand {
+                    band,
+                    band_type,
+                    frequency,
+                    gain,
+                    q,
+                },
             },
         };
 
