@@ -565,7 +565,6 @@ impl MicEqualiser {
         let vis_label = match self.view.visualizer_mode() {
             EqVisualizerMode::Static => "Visual: Static",
             EqVisualizerMode::BeacnBallistics => "Visual: BEACN",
-            EqVisualizerMode::FullDryWet => "Visual: Full DSP",
         };
         let vis_btn = padded_button(vis_label, Alignment::Start)
             .on_press(MicEqualiserEvent::CycleVisualizerMode);
