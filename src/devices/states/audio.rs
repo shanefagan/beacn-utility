@@ -38,7 +38,7 @@ use beacn_lib::flume::Sender;
 use beacn_lib::manager::{DeviceLocation, DeviceType};
 use log::{info, trace, warn};
 
-use crate::devices::states::profile::{AudioProfile, ProfileManager};
+use crate::devices::states::profile::{AudioProfile, ProfileManager, SnapshotSlot, Snapshots};
 
 type Rgb = [u8; 3];
 
@@ -52,6 +52,9 @@ pub(crate) struct AudioState {
 
     pub active_profile_name: String,
     pub is_loading_profile: bool,
+    pub snapshot_a: Option<Vec<Message>>,
+    pub snapshot_b: Option<Vec<Message>>,
+    pub active_snapshot_slot: Option<SnapshotSlot>,
 
     pub headphones: Headphones,
     pub lighting: Lighting,
@@ -848,6 +851,48 @@ impl AudioState {
                 }
             }
 
+            self.is_loading_profile = false;
+            self.save_active_profile();
+
+            let snaps = ProfileManager::load_snapshots(new_name);
+            self.snapshot_a = snaps.slot_a;
+            self.snapshot_b = snaps.slot_b;
+            self.active_snapshot_slot = None;
+        }
+        Ok(())
+    }
+
+    pub fn capture_snapshot(&mut self, slot: SnapshotSlot) {
+        let current = self.current_settings.clone();
+        match slot {
+            SnapshotSlot::A => self.snapshot_a = Some(current),
+            SnapshotSlot::B => self.snapshot_b = Some(current),
+        }
+        self.active_snapshot_slot = Some(slot);
+        let snaps = Snapshots {
+            slot_a: self.snapshot_a.clone(),
+            slot_b: self.snapshot_b.clone(),
+        };
+        let _ = ProfileManager::save_snapshots(&self.active_profile_name, &snaps);
+    }
+
+    pub fn apply_snapshot(&mut self, slot: SnapshotSlot) -> Result<()> {
+        let target = match slot {
+            SnapshotSlot::A => self.snapshot_a.clone(),
+            SnapshotSlot::B => self.snapshot_b.clone(),
+        };
+        if let Some(messages) = target {
+            self.is_loading_profile = true;
+            let valid_messages = Message::generate_fetch_message(
+                self.device_definition.device_type,
+                self.device_definition.device_info.version,
+            );
+            for msg in messages {
+                if valid_messages.iter().any(|v| v.is_same_target(&msg)) {
+                    let _ = self.handle_message(msg);
+                }
+            }
+            self.active_snapshot_slot = Some(slot);
             self.is_loading_profile = false;
             self.save_active_profile();
         }

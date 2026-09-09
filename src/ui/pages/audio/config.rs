@@ -1,6 +1,6 @@
 use crate::devices::states::State;
 use crate::devices::states::audio::AudioState;
-use crate::devices::states::profile::ProfileManager;
+use crate::devices::states::profile::{ProfileManager, SnapshotSlot};
 use crate::ui::pages::audio::config_pages::compressor::CompressorPage;
 use crate::ui::pages::audio::config_pages::expander::ExpanderPage;
 use crate::ui::pages::audio::config_pages::headphones::HeadphonesPage;
@@ -58,6 +58,8 @@ pub(crate) enum ConfigMessage {
     CreateProfile,
     OpenProfileFolder,
     ReloadApoEq,
+    AuditionSnapshot(SnapshotSlot),
+    StoreSnapshot(SnapshotSlot),
 }
 
 pub struct Configuration {
@@ -380,6 +382,38 @@ impl Configuration {
             row = row.push(input).push(save_btn);
         }
 
+        let is_a = state.active_snapshot_slot == Some(SnapshotSlot::A);
+        let is_b = state.active_snapshot_slot == Some(SnapshotSlot::B);
+        let has_a = state.snapshot_a.is_some();
+        let has_b = state.snapshot_b.is_some();
+
+        let mut snap_a = padded_button(if is_a { "[ A ]" } else { "A" }, Alignment::Center);
+        if has_a {
+            snap_a = snap_a.on_press(ConfigMessage::AuditionSnapshot(SnapshotSlot::A));
+        }
+
+        let mut snap_b = padded_button(if is_b { "[ B ]" } else { "B" }, Alignment::Center);
+        if has_b {
+            snap_b = snap_b.on_press(ConfigMessage::AuditionSnapshot(SnapshotSlot::B));
+        }
+
+        let store_a = padded_button("Store A", Alignment::Center)
+            .on_press(ConfigMessage::StoreSnapshot(SnapshotSlot::A));
+        let store_b = padded_button("Store B", Alignment::Center)
+            .on_press(ConfigMessage::StoreSnapshot(SnapshotSlot::B));
+
+        let audition_group = row![
+            text("Audition:").size(12.0),
+            snap_a,
+            snap_b,
+            store_a,
+            store_b,
+        ]
+        .spacing(6.0)
+        .align_y(Alignment::Center);
+
+        row = row.push(Space::new().width(16.0)).push(audition_group);
+
         row.into()
     }
 }
@@ -655,6 +689,21 @@ impl AudioPage for Configuration {
                     } else {
                         self.equaliser.load_device(state);
                     }
+                    Task::none()
+                }
+
+                ConfigMessage::AuditionSnapshot(slot) => {
+                    if let Err(e) = state.apply_snapshot(slot) {
+                        warn!("Failed to apply snapshot {slot:?}: {e}");
+                    } else {
+                        self.equaliser.load_device(state);
+                        self.tab_pages[self.selected_tab].on_open(state);
+                    }
+                    Task::none()
+                }
+
+                ConfigMessage::StoreSnapshot(slot) => {
+                    state.capture_snapshot(slot);
                     Task::none()
                 }
             },
