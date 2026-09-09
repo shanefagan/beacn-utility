@@ -5,7 +5,7 @@ use crate::ui::pages::audio::config_pages::mic_equaliser::MicEqualiserEvent::{
 use crate::ui::widgets::equaliser::eq_common::{
     EQ_MARGIN, EqGeometry, MAX_FREQUENCY, MAX_GAIN, MIN_FREQUENCY, MIN_GAIN, band_type_has_gain,
 };
-use crate::ui::widgets::equaliser::eq_drawer::{EQDrawView, EQMouseEvent};
+use crate::ui::widgets::equaliser::eq_drawer::{EQDrawView, EQMouseEvent, EqVisualizerMode};
 use crate::ui::widgets::helpers::buttons::padded_button;
 use crate::ui::widgets::helpers::drag_value::styled_drag_value;
 use crate::ui::widgets::helpers::svg::{svg_button, svg_button_style};
@@ -36,6 +36,7 @@ pub enum MicEqualiserEvent {
     LoadDefault,
     AddBand,
     RemoveBand,
+    CycleVisualizerMode,
 }
 
 pub struct MicEqualiser {
@@ -265,6 +266,9 @@ impl MicEqualiser {
                     let band = state.eq_microphone.bands[mode][active];
                     self.view.set_band(active, band);
                 }
+            }
+            MicEqualiserEvent::CycleVisualizerMode => {
+                self.view.cycle_visualizer_mode();
             }
         }
 
@@ -544,7 +548,14 @@ impl MicEqualiser {
         let remove_band = padded_button("-", Alignment::Start).on_press_maybe(remove_band);
         let load_default = padded_button("Load Default", Alignment::Start).on_press(LoadDefault);
 
-        let mut row = row![advanced, rule::vertical(1.0),]
+        let vis_label = match self.view.visualizer_mode() {
+            EqVisualizerMode::Static => "Visual: Static",
+            EqVisualizerMode::BeacnBallistics => "Visual: BEACN",
+        };
+        let vis_btn = padded_button(vis_label, Alignment::Start)
+            .on_press(MicEqualiserEvent::CycleVisualizerMode);
+
+        let mut row = row![advanced, rule::vertical(1.0), vis_btn, rule::vertical(1.0),]
             .align_y(Alignment::Center)
             .spacing(10.0)
             .padding(Padding {
