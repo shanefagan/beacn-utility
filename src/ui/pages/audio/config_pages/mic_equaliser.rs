@@ -37,6 +37,7 @@ pub enum MicEqualiserEvent {
     AddBand,
     RemoveBand,
     CycleVisualizerMode,
+    ToggleGuide(bool),
 }
 
 pub struct MicEqualiser {
@@ -49,6 +50,8 @@ pub struct MicEqualiser {
 
     // Used to help drag detection
     pressed_at: Option<Instant>,
+
+    show_guide: bool,
 }
 
 impl MicEqualiser {
@@ -60,6 +63,7 @@ impl MicEqualiser {
             active_band_drag: None,
 
             pressed_at: None,
+            show_guide: true,
         }
     }
 
@@ -269,6 +273,10 @@ impl MicEqualiser {
             }
             MicEqualiserEvent::CycleVisualizerMode => {
                 self.view.cycle_visualizer_mode();
+            }
+            MicEqualiserEvent::ToggleGuide(enabled) => {
+                self.show_guide = enabled;
+                self.view.set_show_guide(enabled);
             }
         }
 
@@ -548,6 +556,12 @@ impl MicEqualiser {
         let remove_band = padded_button("-", Alignment::Start).on_press_maybe(remove_band);
         let load_default = padded_button("Load Default", Alignment::Start).on_press(LoadDefault);
 
+        let guide_button = checkbox(self.show_guide).on_toggle(MicEqualiserEvent::ToggleGuide);
+        let guide_text = text("Guide:");
+        let guide = row![guide_text, guide_button]
+            .spacing(6.0)
+            .align_y(Alignment::Center);
+
         let vis_label = match self.view.visualizer_mode() {
             EqVisualizerMode::Static => "Visual: Static",
             EqVisualizerMode::BeacnBallistics => "Visual: BEACN",
@@ -556,15 +570,22 @@ impl MicEqualiser {
         let vis_btn = padded_button(vis_label, Alignment::Start)
             .on_press(MicEqualiserEvent::CycleVisualizerMode);
 
-        let mut row = row![advanced, rule::vertical(1.0), vis_btn, rule::vertical(1.0),]
-            .align_y(Alignment::Center)
-            .spacing(10.0)
-            .padding(Padding {
-                top: -4.0,
-                bottom: 0.0,
-                left: EQ_MARGIN.width + 13.0,
-                right: 0.0,
-            });
+        let mut row = row![
+            advanced,
+            rule::vertical(1.0),
+            guide,
+            rule::vertical(1.0),
+            vis_btn,
+            rule::vertical(1.0),
+        ]
+        .align_y(Alignment::Center)
+        .spacing(10.0)
+        .padding(Padding {
+            top: -4.0,
+            bottom: 0.0,
+            left: EQ_MARGIN.width + 13.0,
+            right: 0.0,
+        });
 
         if self.active_band.is_some() {
             if is_advanced {

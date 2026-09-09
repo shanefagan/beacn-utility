@@ -60,6 +60,62 @@ fn eq_point_colour(index: usize) -> Color {
     Color::from_rgb8(r, g, b)
 }
 
+/// BEACN frequency guide zone definition
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EqGuideZone {
+    pub label: &'static str,
+    pub min_freq: u32,
+    pub max_freq: u32,
+    pub db_offset: f32,
+    pub is_alternate: bool,
+}
+
+pub const EQ_GUIDE_ZONES: [EqGuideZone; 6] = [
+    EqGuideZone {
+        label: "SUB BASS",
+        min_freq: 20,
+        max_freq: 80,
+        db_offset: 1.8,
+        is_alternate: false,
+    },
+    EqGuideZone {
+        label: "BASS / MUDDINESS",
+        min_freq: 80,
+        max_freq: 250,
+        db_offset: -1.8,
+        is_alternate: true,
+    },
+    EqGuideZone {
+        label: "BROADCAST",
+        min_freq: 250,
+        max_freq: 1000,
+        db_offset: 1.8,
+        is_alternate: false,
+    },
+    EqGuideZone {
+        label: "NASAL",
+        min_freq: 1000,
+        max_freq: 2500,
+        db_offset: -1.8,
+        is_alternate: true,
+    },
+    EqGuideZone {
+        label: "LOW / MID HIGHS & ESSES",
+        min_freq: 2500,
+        max_freq: 7000,
+        db_offset: 1.8,
+        is_alternate: false,
+    },
+    EqGuideZone {
+        label: "HIGHS & AIR",
+        min_freq: 7000,
+        max_freq: 20000,
+        db_offset: -1.8,
+        is_alternate: true,
+    },
+];
+
+
 /// Mouse events for the EQ widget
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EQMouseEvent {
@@ -102,6 +158,9 @@ pub struct EQDrawView {
     // Visualizer Mode
     visualizer_mode: EqVisualizerMode,
 
+    // Guide mode showing official BEACN vocal frequency blocks
+    show_guide: bool,
+
     // Spectrum Data points
     spectrum_bins: Vec<f32>,
     dry_spectrum_bins: Vec<f32>,
@@ -129,6 +188,7 @@ impl EQDrawView {
             band_freq_response: RefCell::new(Default::default()),
 
             visualizer_mode: EqVisualizerMode::BeacnBallistics,
+            show_guide: true,
             spectrum_bins: vec![],
             dry_spectrum_bins: vec![],
             wet_spectrum_bins: vec![],
@@ -173,6 +233,20 @@ impl EQDrawView {
         self.set_visualizer_mode(next);
         next
     }
+
+    /// Whether the BEACN frequency guide blocks and labels are shown
+    pub fn show_guide(&self) -> bool {
+        self.show_guide
+    }
+
+    /// Toggle the frequency guide blocks and labels
+    pub fn set_show_guide(&mut self, show: bool) {
+        if self.show_guide != show {
+            self.show_guide = show;
+            self.grid_cache.clear();
+        }
+    }
+
 
     /// Replace entire bandset at once
     pub fn set_bands(&mut self, bands: Bands) {
@@ -264,6 +338,68 @@ impl EQDrawView {
         let freq_ticks = [30, 50, 100, 250, 500, 1000, 2000, 5000, 10000, 16000];
 
         frame.fill_rectangle(plot_rect.position(), plot_rect.size(), background);
+
+        if self.show_guide {
+            // Alternating vertical column shading matching official BEACN software
+            for zone in &EQ_GUIDE_ZONES {
+                let x_start = EqGeometry::freq_to_x(zone.min_freq, plot_rect)
+                    .clamp(plot_rect.x, plot_rect.x + plot_rect.width);
+                let x_end = EqGeometry::freq_to_x(zone.max_freq, plot_rect)
+                    .clamp(plot_rect.x, plot_rect.x + plot_rect.width);
+                let zone_width = x_end - x_start;
+
+                if zone.is_alternate && zone_width > 0.0 {
+                    frame.fill_rectangle(
+                        Point::new(x_start, plot_rect.y + EQ_PLOT_BORDER_WIDTH),
+                        iced::Size::new(zone_width, plot_rect.height - EQ_PLOT_BORDER_WIDTH * 2.0),
+                        Color::from_rgba8(255, 255, 255, 0.025),
+                    );
+                }
+
+                // Vertical boundary line between zones
+                if x_start > plot_rect.x + 1.0 && x_start < plot_rect.x + plot_rect.width - 1.0 {
+                    frame.stroke(
+                        &Path::line(
+                            Point::new(x_start, plot_rect.y + EQ_PLOT_BORDER_WIDTH),
+                            Point::new(x_start, plot_rect.y + plot_rect.height - EQ_PLOT_BORDER_WIDTH),
+                        ),
+                        Stroke::default()
+                            .with_color(Color::from_rgba8(255, 255, 255, 0.06))
+                            .with_width(1.0),
+                    );
+                }
+            }
+
+            // Draw horizontal 0 dB center reference line
+            let y_zero = EqGeometry::db_to_y(0.0, plot_rect);
+            frame.stroke(
+                &Path::line(
+                    Point::new(plot_rect.x + EQ_PLOT_BORDER_WIDTH, y_zero),
+                    Point::new(plot_rect.x + plot_rect.width - EQ_PLOT_BORDER_WIDTH, y_zero),
+                ),
+                Stroke::default()
+                    .with_color(Color::from_rgba8(255, 255, 255, 0.15))
+                    .with_width(1.0),
+            );
+
+            // Draw guide text labels (staggered above/below 0 dB line)
+            for zone in &EQ_GUIDE_ZONES {
+                let x_start = EqGeometry::freq_to_x(zone.min_freq, plot_rect);
+                let x_end = EqGeometry::freq_to_x(zone.max_freq, plot_rect);
+                let x_center = (x_start + x_end) / 2.0;
+                let y_pos = EqGeometry::db_to_y(zone.db_offset, plot_rect);
+
+                frame.fill_text(canvas::Text {
+                    content: zone.label.to_string(),
+                    position: Point::new(x_center, y_pos),
+                    color: Color::from_rgba8(190, 195, 205, 0.50),
+                    size: Pixels(10.5),
+                    align_x: Alignment::Center,
+                    align_y: Vertical::Center,
+                    ..canvas::Text::default()
+                });
+            }
+        }
 
         let half = EQ_PLOT_BORDER_WIDTH / 2.0;
         let border_rect = Rectangle::new(
@@ -1109,6 +1245,28 @@ mod tests {
     }
 
     #[test]
+    fn test_eq_guide_zones() {
+        assert_eq!(EQ_GUIDE_ZONES.len(), 6);
+        assert_eq!(EQ_GUIDE_ZONES[0].label, "SUB BASS");
+        assert_eq!(EQ_GUIDE_ZONES[1].label, "BASS / MUDDINESS");
+        assert_eq!(EQ_GUIDE_ZONES[2].label, "BROADCAST");
+        assert_eq!(EQ_GUIDE_ZONES[3].label, "NASAL");
+        assert_eq!(EQ_GUIDE_ZONES[4].label, "LOW / MID HIGHS & ESSES");
+        assert_eq!(EQ_GUIDE_ZONES[5].label, "HIGHS & AIR");
+
+        // Frequencies must be contiguous and ascending
+        for i in 0..EQ_GUIDE_ZONES.len() - 1 {
+            assert_eq!(EQ_GUIDE_ZONES[i].max_freq, EQ_GUIDE_ZONES[i + 1].min_freq);
+        }
+
+        let mut view = EQDrawView::default();
+        assert!(view.show_guide());
+
+        view.set_show_guide(false);
+        assert!(!view.show_guide());
+    }
+
+    #[test]
     #[ignore]
     fn test_benchmark_visualizer_modes() {
         let mut bands = Bands::default();
@@ -1184,7 +1342,6 @@ mod tests {
         let per_op_full = dur_full_dry_wet.as_secs_f64() * 1_000_000.0 / ITERATIONS as f64;
 
         // At 60 FPS, there are 16,666.67 microseconds per frame.
-        // % of 1 CPU core = (time_per_frame_us * 60) / 1,000,000 * 100% = time_per_frame_us / 166.6667
         let cpu_pct_beacn = (per_op_beacn * 60.0) / 10_000.0;
         let cpu_pct_full = (per_op_full * 60.0) / 10_000.0;
         let cpu_pct_static_drag = (per_op_static * 60.0) / 10_000.0;
@@ -1199,3 +1356,5 @@ mod tests {
         println!("==========================================================================\n");
     }
 }
+
+
