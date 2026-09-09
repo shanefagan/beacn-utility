@@ -18,6 +18,18 @@ use strum::IntoEnumIterator;
 
 use crate::get_config_path;
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SnapshotSlot {
+    A,
+    B,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Snapshots {
+    pub slot_a: Option<Vec<Message>>,
+    pub slot_b: Option<Vec<Message>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioProfile {
     pub schema_version: u32,
@@ -329,6 +341,28 @@ impl ProfileManager {
         Ok(())
     }
 
+    /// Load snapshots for a profile from disk
+    pub fn load_snapshots(profile_name: &str) -> Snapshots {
+        if let Ok(dir) = Self::get_profile_dir(profile_name) {
+            let snap_file = dir.join("snapshots.json");
+            if let Ok(file) = File::open(snap_file)
+                && let Ok(snaps) = serde_json::from_reader(file)
+            {
+                return snaps;
+            }
+        }
+        Snapshots::default()
+    }
+
+    /// Save snapshots for a profile to disk
+    pub fn save_snapshots(profile_name: &str, snapshots: &Snapshots) -> Result<()> {
+        let dir = Self::get_profile_dir(profile_name)?;
+        let snap_file = dir.join("snapshots.json");
+        let file = File::create(snap_file)?;
+        serde_json::to_writer_pretty(file, snapshots)?;
+        Ok(())
+    }
+
     /// Delete a profile directory
     pub fn delete_profile(profile_name: &str) -> Result<()> {
         if profile_name.eq_ignore_ascii_case("Default") {
@@ -387,5 +421,17 @@ mod tests {
             "Invalid_Name_Test__"
         );
         assert_eq!(sanitize_filename("Name with spaces"), "Name with spaces");
+    }
+
+    #[test]
+    fn test_snapshots_save_load() {
+        let snaps = Snapshots {
+            slot_a: Some(vec![]),
+            slot_b: None,
+        };
+        let json = serde_json::to_string(&snaps).unwrap();
+        let loaded: Snapshots = serde_json::from_str(&json).unwrap();
+        assert!(loaded.slot_a.is_some());
+        assert!(loaded.slot_b.is_none());
     }
 }
