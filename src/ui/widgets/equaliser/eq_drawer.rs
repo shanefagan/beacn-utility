@@ -14,6 +14,8 @@ pub enum EqVisualizerMode {
     /// Official BEACN software style: ballistics modulate the low (bass) and high (sibilance) ends of the main curve
     #[default]
     BeacnBallistics,
+    /// Full dry/wet dynamic transfer function across the spectrum (original fork)
+    FullDryWet,
 }
 use enum_map::EnumMap;
 use iced::alignment::Vertical;
@@ -161,6 +163,8 @@ pub struct EQDrawView {
 
     // Spectrum Data points
     spectrum_bins: Vec<f32>,
+    dry_spectrum_bins: Vec<f32>,
+    wet_spectrum_bins: Vec<f32>,
 }
 
 impl Default for EQDrawView {
@@ -186,6 +190,8 @@ impl EQDrawView {
             visualizer_mode: EqVisualizerMode::BeacnBallistics,
             show_guide: true,
             spectrum_bins: vec![],
+            dry_spectrum_bins: vec![],
+            wet_spectrum_bins: vec![],
         }
     }
 
@@ -221,7 +227,8 @@ impl EQDrawView {
     pub fn cycle_visualizer_mode(&mut self) -> EqVisualizerMode {
         let next = match self.visualizer_mode {
             EqVisualizerMode::Static => EqVisualizerMode::BeacnBallistics,
-            EqVisualizerMode::BeacnBallistics => EqVisualizerMode::Static,
+            EqVisualizerMode::BeacnBallistics => EqVisualizerMode::FullDryWet,
+            EqVisualizerMode::FullDryWet => EqVisualizerMode::Static,
         };
         self.set_visualizer_mode(next);
         next
@@ -270,7 +277,13 @@ impl EQDrawView {
     }
 
     pub fn set_spectrum(&mut self, data: Vec<f32>) {
-        self.spectrum_bins = data;
+        self.set_dual_spectrum(data, None);
+    }
+
+    pub fn set_dual_spectrum(&mut self, dry: Vec<f32>, wet: Option<Vec<f32>>) {
+        self.spectrum_bins = dry.clone();
+        self.dry_spectrum_bins = dry;
+        self.wet_spectrum_bins = wet.unwrap_or_default();
         self.spectrum_cache.clear();
         if self.visualizer_mode != EqVisualizerMode::Static {
             self.curve_cache.clear();
@@ -279,6 +292,8 @@ impl EQDrawView {
 
     pub fn clear_spectrum(&mut self) {
         self.spectrum_bins = vec![];
+        self.dry_spectrum_bins = vec![];
+        self.wet_spectrum_bins = vec![];
         self.spectrum_cache.clear();
         if self.visualizer_mode != EqVisualizerMode::Static {
             self.curve_cache.clear();
@@ -574,14 +589,132 @@ impl EQDrawView {
         );
     }
 
+    fn sample_spectrum(bins: &[f32], t: f32) -> f32 {
+        if bins.is_empty() {
+            return -120.0;
+        }
+        let t = t.clamp(0.0, 1.0);
+        let index_f = t * (bins.len() - 1) as f32;
+        let i0 = index_f.floor() as usize;
+        let i1 = (i0 + 1).min(bins.len() - 1);
+        let frac = index_f - (i0 as f32);
+        bins[i0] + frac * (bins[i1] - bins[i0])
+    }
+
+    pub fn compute_animated_curves(
+        &self,
+        plot_rect: Rectangle,
+    ) -> (EnumMap<EQBand, Vec<f32>>, Vec<f32>, f32) {
+        let steps = EQ_CURVE_RESOLUTION;
+        let mut anim_responses: EnumMap<EQBand, Vec<f32>> = Default::default();
+        let mut summed = vec![0.0_f32; steps + 1];
+
+        let enabled_bands: Vec<EQBand> = EQBand::iter()
+            .filter(|&band| self.bands[band].enabled)
+            .collect();
+
+        if enabled_bands.is_empty() {
+            return (anim_responses, summed, 0.0);
+        }
+
+        let mut raw_responses: EnumMap<EQBand, Vec<f32>> = Default::default();
+        for &band in &enabled_bands {
+            raw_responses[band] = self.get_eq_frequency_response(plot_rect, band, steps);
+        }
+
+        if self.dry_spectrum_bins.is_empty() {
+            for &band in &enabled_bands {
+                let resp = raw_responses[band].clone();
+                for (s, &r) in summed.iter_mut().zip(&resp) {
+                    *s += r;
+                }
+                anim_responses[band] = resp;
+            }
+            return (anim_responses, summed, 0.0);
+        }
+
+        let log_min = (MIN_FREQUENCY as f32).ln();
+        let log_max = (MAX_FREQUENCY as f32).ln();
+
+        for &band in &enabled_bands {
+            anim_responses[band] = vec![0.0_f32; steps + 1];
+        }
+
+        let mut total_activity = 0.0_f32;
+
+        for i in 0..=steps {
+            let t = i as f32 / steps as f32;
+            let d_db = Self::sample_spectrum(&self.dry_spectrum_bins, t);
+            let w_db = if self.wet_spectrum_bins.is_empty() {
+                d_db
+            } else {
+                Self::sample_spectrum(&self.wet_spectrum_bins, t)
+            };
+
+            // Vocal activity detection: ambient floor (-62 dBFS) to speech peak (-30 dBFS)
+            let activity = ((d_db - (-62.0)) / 32.0).clamp(0.0, 1.0);
+            total_activity += activity;
+
+            // Measured DSP transfer difference (wet vs dry) clamped to realistic hardware range
+            let delta_dsp = (w_db - d_db).clamp(-24.0, 18.0);
+
+            let mut raw_total = 0.0_f32;
+            let mut sum_abs_raw = 0.0_f32;
+            for &band in &enabled_bands {
+                let g = raw_responses[band][i];
+                raw_total += g;
+                sum_abs_raw += g.abs();
+            }
+
+            // Difference between measured DSP behavior and dialled-in static EQ target
+            let diff = delta_dsp - raw_total;
+
+            for &band in &enabled_bands {
+                let g_raw = raw_responses[band][i];
+
+                let weight = if sum_abs_raw > 0.05 {
+                    g_raw.abs() / sum_abs_raw
+                } else {
+                    let freq = (self.bands[band].frequency as f32)
+                        .clamp(MIN_FREQUENCY as f32, MAX_FREQUENCY as f32);
+                    let center_t = (freq.ln() - log_min) / (log_max - log_min);
+                    let dist = (t - center_t).abs();
+                    (-dist * dist / (2.0 * 0.12 * 0.12)).exp()
+                };
+
+                // Dynamic modulation: responds to DSP difference (de-esser dips, bass boosts)
+                // plus subtle vocal breathing proportional to dialed gain
+                let delta_band = activity * (diff * weight + g_raw * 0.12);
+                let g_anim = (g_raw + delta_band).clamp(MIN_GAIN, MAX_GAIN);
+
+                anim_responses[band][i] = g_anim;
+                summed[i] += g_anim;
+            }
+
+            summed[i] = summed[i].clamp(MIN_GAIN, MAX_GAIN);
+        }
+
+        let avg_activity = total_activity / (steps + 1) as f32;
+        (anim_responses, summed, avg_activity)
+    }
+
     fn draw_eq_individual(
         &self,
         frame: &mut Frame,
         band: EQBand,
         plot_rect: Rectangle,
         colour: Color,
+        gains_override: Option<&[f32]>,
     ) {
-        let gains = self.get_eq_frequency_response(plot_rect, band, EQ_CURVE_RESOLUTION);
+        let default_gains;
+        let gains: &[f32] = match gains_override {
+            Some(g) => g,
+            None => {
+                default_gains =
+                    self.get_eq_frequency_response(plot_rect, band, EQ_CURVE_RESOLUTION);
+                &default_gains
+            }
+        };
         let steps = gains.len() - 1;
 
         let points: Vec<Point> = gains
@@ -866,32 +999,66 @@ impl canvas::Program<EQMouseEvent> for EQDrawView {
         plot_rect.x += EQ_PLOT_BORDER_WIDTH;
         plot_rect.width -= EQ_PLOT_BORDER_WIDTH * 2.0;
 
-        for (index, band) in EQBand::iter().enumerate() {
-            if self.bands[band].enabled {
-                let colour = eq_transparent_colour(index);
-                geometries.push(
-                    self.band_caches[band].draw(renderer, bounds.size(), |frame| {
-                        self.draw_eq_individual(frame, band, plot_rect, colour);
-                    }),
-                );
-            }
-        }
+        if self.visualizer_mode == EqVisualizerMode::FullDryWet
+            && !self.dry_spectrum_bins.is_empty()
+        {
+            let (anim_responses, summed, _avg_activity) = self.compute_animated_curves(plot_rect);
 
-        if !self.spectrum_bins.is_empty() {
-            geometries.push(self.spectrum_cache.draw(renderer, bounds.size(), |frame| {
-                self.draw_spectrum(frame, plot_rect);
+            if !self.dry_spectrum_bins.is_empty() {
+                geometries.push(self.spectrum_cache.draw(renderer, bounds.size(), |frame| {
+                    self.draw_spectrum(frame, plot_rect);
+                }));
+            }
+
+            for (index, band) in EQBand::iter().enumerate() {
+                if self.bands[band].enabled {
+                    let colour = eq_transparent_colour(index);
+                    let mut band_frame = Frame::new(renderer, bounds.size());
+                    self.draw_eq_individual(
+                        &mut band_frame,
+                        band,
+                        plot_rect,
+                        colour,
+                        Some(&anim_responses[band]),
+                    );
+                    geometries.push(band_frame.into_geometry());
+                }
+            }
+
+            let mut curve_frame = Frame::new(renderer, bounds.size());
+            self.draw_eq_curve(&mut curve_frame, plot_rect, &summed);
+            geometries.push(curve_frame.into_geometry());
+        } else {
+            for (index, band) in EQBand::iter().enumerate() {
+                if self.bands[band].enabled {
+                    let colour = eq_transparent_colour(index);
+                    geometries.push(self.band_caches[band].draw(
+                        renderer,
+                        bounds.size(),
+                        |frame| {
+                            self.draw_eq_individual(frame, band, plot_rect, colour, None);
+                        },
+                    ));
+                }
+            }
+
+            if !self.spectrum_bins.is_empty() {
+                geometries.push(self.spectrum_cache.draw(renderer, bounds.size(), |frame| {
+                    self.draw_spectrum(frame, plot_rect);
+                }));
+            }
+
+            let summed = self.get_summed_frequency_response(plot_rect, EQ_CURVE_RESOLUTION);
+            let curve_gains = match self.visualizer_mode {
+                EqVisualizerMode::Static => summed,
+                EqVisualizerMode::BeacnBallistics => self.compute_beacn_ballistics(&summed),
+                EqVisualizerMode::FullDryWet => self.compute_beacn_ballistics(&summed),
+            };
+
+            geometries.push(self.curve_cache.draw(renderer, bounds.size(), |frame| {
+                self.draw_eq_curve(frame, plot_rect, &curve_gains);
             }));
         }
-
-        let summed = self.get_summed_frequency_response(plot_rect, EQ_CURVE_RESOLUTION);
-        let curve_gains = match self.visualizer_mode {
-            EqVisualizerMode::Static => summed,
-            EqVisualizerMode::BeacnBallistics => self.compute_beacn_ballistics(&summed),
-        };
-
-        geometries.push(self.curve_cache.draw(renderer, bounds.size(), |frame| {
-            self.draw_eq_curve(frame, plot_rect, &curve_gains);
-        }));
 
         // Control points + selection ring are cheap and depend on
         // `active`, which can change every frame - draw fresh, uncached.
@@ -976,11 +1143,15 @@ fn catmull_rom_continue(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use beacn_lib::audio::messages::eq_common::EQBandType;
 
     #[test]
     fn test_visualizer_mode_cycling() {
         let mut view = EQDrawView::default();
         assert_eq!(view.visualizer_mode(), EqVisualizerMode::BeacnBallistics);
+
+        assert_eq!(view.cycle_visualizer_mode(), EqVisualizerMode::FullDryWet);
+        assert_eq!(view.visualizer_mode(), EqVisualizerMode::FullDryWet);
 
         assert_eq!(view.cycle_visualizer_mode(), EqVisualizerMode::Static);
         assert_eq!(view.visualizer_mode(), EqVisualizerMode::Static);
@@ -990,6 +1161,40 @@ mod tests {
             EqVisualizerMode::BeacnBallistics
         );
         assert_eq!(view.visualizer_mode(), EqVisualizerMode::BeacnBallistics);
+    }
+
+    #[test]
+    fn test_compute_animated_curves_full_dry_wet() {
+        let mut bands = Bands::default();
+        bands[EQBand::Band1] = EqualiserBandConfig {
+            enabled: true,
+            band_type: EQBandType::HighShelf,
+            frequency: 4000,
+            gain: 6.0,
+            q: 0.7,
+        };
+
+        let mut view = EQDrawView::new(bands);
+        let plot_rect = Rectangle::new(Point::new(0.0, 0.0), iced::Size::new(800.0, 400.0));
+
+        let (anim_empty, summed_empty, act_empty) = view.compute_animated_curves(plot_rect);
+        assert_eq!(act_empty, 0.0);
+        assert_eq!(anim_empty[EQBand::Band1].len(), EQ_CURVE_RESOLUTION + 1);
+        assert_eq!(summed_empty.len(), EQ_CURVE_RESOLUTION + 1);
+
+        let dry = vec![-25.0; 256];
+        let mut wet = vec![-25.0; 256];
+        for i in 180..256 {
+            wet[i] = -31.0;
+        }
+
+        view.set_dual_spectrum(dry, Some(wet));
+        let (anim, summed, act) = view.compute_animated_curves(plot_rect);
+        assert!(act > 0.8);
+
+        let high_idx = (EQ_CURVE_RESOLUTION as f32 * 0.9) as usize;
+        assert!(anim[EQBand::Band1][high_idx] < anim_empty[EQBand::Band1][high_idx]);
+        assert!(summed[high_idx] < summed_empty[high_idx]);
     }
 
     #[test]

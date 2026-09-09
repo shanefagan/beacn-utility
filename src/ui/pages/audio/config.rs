@@ -54,6 +54,7 @@ pub struct Configuration {
     equaliser: MicEqualiser,
     spectrum_handler: Option<SpectrumHandle>,
     spectrum_data: Option<Arc<Mutex<Vec<f32>>>>,
+    wet_spectrum_data: Option<Arc<Mutex<Vec<f32>>>>,
 
     loopback_handler: Option<LoopbackHandler>,
 
@@ -69,6 +70,7 @@ impl Configuration {
             equaliser: MicEqualiser::new(),
             spectrum_handler: None,
             spectrum_data: None,
+            wet_spectrum_data: None,
 
             loopback_handler: None,
 
@@ -346,6 +348,7 @@ impl AudioPage for Configuration {
 
         let mut spectrum_port = None;
         let mut dry_mix_port = None;
+        let mut wet_mix_port = None;
         let mut loopback_port = None;
 
         if let Ok(nodes) = nodes {
@@ -368,14 +371,17 @@ impl AudioPage for Configuration {
                         }
                     }
                 } else {
-                    // AUX2 is the Dry Mix, and AUX3 is the Post-Expander Dry Mix. These ports are not
-                    // available on a Beacn Mic in compliancy mode.
+                    // AUX2 is the Dry Mix, and AUX3 is the Post-Expander Dry Mix.
+                    // AUX0 is the fully processed wet mic mix.
                     if node.channels.len() == expected_source_channels {
                         if let Some(port) = node.channels.get("AUX2") {
                             dry_mix_port.replace(*port);
                         }
                         if let Some(port) = node.channels.get("AUX3") {
                             spectrum_port.replace(vec![*port]);
+                        }
+                        if let Some(port) = node.channels.get("AUX0") {
+                            wet_mix_port.replace(*port);
                         }
                     }
                 }
@@ -389,14 +395,20 @@ impl AudioPage for Configuration {
             self.loopback_handler = Some(LoopbackHandler::new(dry_mix_port, loopback_port));
         }
 
-        if let Some(spectrum_ports) = spectrum_port
+        if let Some(mut spectrum_ports) = spectrum_port
             && self.spectrum_handler.is_none()
         {
+            if let Some(wet_port) = wet_mix_port {
+                spectrum_ports.push(wet_port);
+            }
             // Ok, we have a usable port list, let's fire up a listener..
             let handler = start_spectrum_analyser(spectrum_ports, 48000);
 
-            // Get the internal Spectrum Data. We only use a single port here, so grab the only entry.
+            // Get the internal Spectrum Data
             self.spectrum_data = Some(handler.data[0].clone());
+            if handler.data.len() > 1 {
+                self.wet_spectrum_data = Some(handler.data[1].clone());
+            }
             self.spectrum_handler = Some(handler);
         }
 
@@ -408,6 +420,8 @@ impl AudioPage for Configuration {
         if let Some(handler) = self.spectrum_handler.take() {
             handler.stop();
         }
+        self.spectrum_data = None;
+        self.wet_spectrum_data = None;
 
         if let Some(mut handler) = self.loopback_handler.take() {
             handler.stop();
@@ -451,6 +465,7 @@ impl AudioPage for Configuration {
         if handler.has_stopped() {
             self.spectrum_handler = None;
             self.spectrum_data = None;
+            self.wet_spectrum_data = None;
 
             self.equaliser.clear_spectrum_data();
             return Task::none();
@@ -460,13 +475,16 @@ impl AudioPage for Configuration {
         let Some(data) = self.spectrum_data.as_mut() else {
             self.spectrum_handler = None;
             self.spectrum_data = None;
+            self.wet_spectrum_data = None;
 
             self.equaliser.clear_spectrum_data();
             return Task::none();
         };
 
+        let wet_data = self.wet_spectrum_data.as_ref().and_then(|w| w.lock().ok());
         if let Ok(guard) = data.lock() {
-            self.equaliser.set_spectrum_data(guard.clone());
+            self.equaliser
+                .set_dual_spectrum_data(guard.clone(), wet_data.as_deref().cloned());
         }
         Task::none()
     }
