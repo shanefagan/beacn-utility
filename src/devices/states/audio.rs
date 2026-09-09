@@ -4,7 +4,7 @@ use beacn_lib::audio::data::BulkMessage;
 use beacn_lib::audio::messages::Message;
 use beacn_lib::audio::messages::bass_enhancement::BassPreset;
 use beacn_lib::audio::messages::compressor::CompressorMode;
-use beacn_lib::audio::messages::eq_common::{EQBand, EQBandType};
+use beacn_lib::audio::messages::eq_common::{EQBand, EQBandType, EQFrequency, EQGain, EQQ};
 use beacn_lib::audio::messages::eq_headphones_legacy::HPEQType;
 use beacn_lib::audio::messages::expander::ExpanderMode;
 use beacn_lib::audio::messages::headphones::HeadphoneTypes;
@@ -14,6 +14,7 @@ use beacn_lib::audio::messages::lighting::{
 use beacn_lib::audio::messages::suppressor::SuppressorStyle;
 use beacn_lib::types::ToInner;
 use enum_map::EnumMap;
+use strum::IntoEnumIterator;
 
 use crate::devices::manager::{
     AudioMessage, DefinitionState, DeviceDefinition, ErrorType, LinkedCommands,
@@ -125,7 +126,7 @@ pub(crate) struct EQHeadphones {
 }
 
 #[derive(Debug, Default, Copy, Clone)]
-pub(crate) struct EqualiserBandConfig {
+pub struct EqualiserBandConfig {
     pub enabled: bool,
     pub band_type: EQBandType,
     pub frequency: u32, // [0..=20000]Hz
@@ -819,7 +820,14 @@ impl AudioState {
             settings: filtered_settings,
         };
 
-        let _ = ProfileManager::save_profile(&self.active_profile_name, &profile);
+        let mic_bands: Vec<(EQBand, EqualiserBandConfig)> = EQBand::iter()
+            .map(|b| (b, self.eq_microphone.bands[EQMode::Advanced][b]))
+            .collect();
+        let _ = ProfileManager::save_profile_with_apo(
+            &self.active_profile_name,
+            &profile,
+            Some(&mic_bands),
+        );
     }
 
     pub fn switch_profile(&mut self, new_name: &str) -> Result<()> {
@@ -849,6 +857,61 @@ impl AudioState {
     pub fn save_profile_as(&mut self, new_name: &str) -> Result<()> {
         self.active_profile_name = new_name.to_string();
         let _ = ProfileManager::set_active_profile_name(new_name);
+        self.save_active_profile();
+        Ok(())
+    }
+
+    pub fn reload_apo_eq(&mut self) -> Result<()> {
+        let dir = ProfileManager::get_profile_dir(&self.active_profile_name)?;
+        let mic_eq_file = dir.join("mic_eq.txt");
+        if !mic_eq_file.exists() {
+            return Ok(());
+        }
+        let text = std::fs::read_to_string(&mic_eq_file)?;
+        let imported = crate::devices::states::profile::import_apo_eq(&text);
+        if imported.is_empty() {
+            return Ok(());
+        }
+
+        for (i, cfg) in imported.into_iter().enumerate() {
+            let band = match i {
+                0 => EQBand::Band1,
+                1 => EQBand::Band2,
+                2 => EQBand::Band3,
+                3 => EQBand::Band4,
+                4 => EQBand::Band5,
+                5 => EQBand::Band6,
+                6 => EQBand::Band7,
+                7 => EQBand::Band8,
+                8 => EQBand::Band9,
+                _ => break,
+            };
+            let _ = self.handle_message(Message::EQMicrophone(MicEqualiser::Type(
+                EQMode::Advanced,
+                band,
+                cfg.band_type,
+            )));
+            let _ = self.handle_message(Message::EQMicrophone(MicEqualiser::Frequency(
+                EQMode::Advanced,
+                band,
+                EQFrequency(cfg.frequency as f32),
+            )));
+            let _ = self.handle_message(Message::EQMicrophone(MicEqualiser::Gain(
+                EQMode::Advanced,
+                band,
+                EQGain(cfg.gain),
+            )));
+            let _ = self.handle_message(Message::EQMicrophone(MicEqualiser::Q(
+                EQMode::Advanced,
+                band,
+                EQQ(cfg.q),
+            )));
+            let _ = self.handle_message(Message::EQMicrophone(MicEqualiser::Enabled(
+                EQMode::Advanced,
+                band,
+                cfg.enabled,
+            )));
+        }
         self.save_active_profile();
         Ok(())
     }

@@ -56,6 +56,8 @@ pub(crate) enum ConfigMessage {
     ToggleNewProfile,
     NewProfileNameChanged(String),
     CreateProfile,
+    OpenProfileFolder,
+    ReloadApoEq,
 }
 
 pub struct Configuration {
@@ -351,9 +353,21 @@ impl Configuration {
         let new_btn =
             padded_button("+ New", Alignment::Center).on_press(ConfigMessage::ToggleNewProfile);
 
-        let mut row = row![text("Profile:").size(12.0), profile_picker, new_btn,]
-            .spacing(8.0)
-            .align_y(Alignment::Center);
+        let open_dir_btn = padded_button("Open Folder", Alignment::Center)
+            .on_press(ConfigMessage::OpenProfileFolder);
+
+        let reload_apo_btn =
+            padded_button("Reload EQ", Alignment::Center).on_press(ConfigMessage::ReloadApoEq);
+
+        let mut row = row![
+            text("Profile:").size(12.0),
+            profile_picker,
+            new_btn,
+            open_dir_btn,
+            reload_apo_btn,
+        ]
+        .spacing(8.0)
+        .align_y(Alignment::Center);
 
         if self.show_new_profile_input {
             let input = text_input("Profile name...", &self.new_profile_name)
@@ -624,6 +638,22 @@ impl AudioPage for Configuration {
                         self.available_profiles = ProfileManager::list_profiles();
                         self.show_new_profile_input = false;
                         self.new_profile_name.clear();
+                    }
+                    Task::none()
+                }
+
+                ConfigMessage::OpenProfileFolder => {
+                    if let Ok(dir) = ProfileManager::get_profile_dir(&state.active_profile_name) {
+                        let _ = open::that_detached(dir);
+                    }
+                    Task::none()
+                }
+
+                ConfigMessage::ReloadApoEq => {
+                    if let Err(e) = state.reload_apo_eq() {
+                        warn!("Failed to reload mic_eq.txt: {e}");
+                    } else {
+                        self.equaliser.load_device(state);
                     }
                     Task::none()
                 }

@@ -16,7 +16,9 @@ use std::fs::{self, File};
 use std::path::PathBuf;
 use strum::IntoEnumIterator;
 
+use crate::devices::states::audio::EqualiserBandConfig;
 use crate::get_config_path;
+use crate::ui::widgets::equaliser::eq_common::{MAX_FREQUENCY, MAX_GAIN, MIN_FREQUENCY, MIN_GAIN};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioProfile {
@@ -321,10 +323,26 @@ impl ProfileManager {
 
     /// Save profile to disk
     pub fn save_profile(profile_name: &str, profile: &AudioProfile) -> Result<()> {
+        Self::save_profile_with_apo(profile_name, profile, None)
+    }
+
+    /// Save profile to disk along with Equalizer APO formatted mic_eq.txt
+    pub fn save_profile_with_apo(
+        profile_name: &str,
+        profile: &AudioProfile,
+        mic_bands: Option<&[(EQBand, EqualiserBandConfig)]>,
+    ) -> Result<()> {
         let dir = Self::get_profile_dir(profile_name)?;
         let profile_file = dir.join("profile.json");
         let file = File::create(&profile_file)?;
         serde_json::to_writer_pretty(file, profile)?;
+
+        if let Some(bands) = mic_bands {
+            let mic_eq_file = dir.join("mic_eq.txt");
+            let content = export_apo_eq(bands, "Microphone");
+            fs::write(mic_eq_file, content)?;
+        }
+
         debug!("Saved audio profile to: {profile_file:?}");
         Ok(())
     }
@@ -349,6 +367,128 @@ pub fn sanitize_filename(name: &str) -> String {
             _ => c,
         })
         .collect()
+}
+
+/// Export Equalizer bands into universal Equalizer APO / Room EQ Wizard standard format
+pub fn export_apo_eq(bands: &[(EQBand, EqualiserBandConfig)], title: &str) -> String {
+    let mut out = format!(
+        "# Equalizer APO / REW Parametric EQ Configuration ({title})\n# Exported from BEACN Utility\n\n"
+    );
+
+    let mut filter_num = 1;
+    for (_band, cfg) in bands {
+        if !cfg.enabled {
+            continue;
+        }
+
+        let type_str = match cfg.band_type {
+            EQBandType::HighPassFilter => "HP",
+            EQBandType::LowPassFilter => "LP",
+            EQBandType::BellBand => "PK",
+            EQBandType::LowShelf => "LSC",
+            EQBandType::HighShelf => "HSC",
+            EQBandType::NotchFilter => "NO",
+            EQBandType::NotSet => continue,
+        };
+
+        match cfg.band_type {
+            EQBandType::HighPassFilter | EQBandType::LowPassFilter => {
+                out.push_str(&format!(
+                    "Filter {filter_num}: ON {type_str} Fc {} Hz\n",
+                    cfg.frequency
+                ));
+            }
+            EQBandType::NotchFilter => {
+                out.push_str(&format!(
+                    "Filter {filter_num}: ON {type_str} Fc {} Hz Q {:.2}\n",
+                    cfg.frequency, cfg.q
+                ));
+            }
+            _ => {
+                out.push_str(&format!(
+                    "Filter {filter_num}: ON {type_str} Fc {} Hz Gain {:.1} dB Q {:.2}\n",
+                    cfg.frequency, cfg.gain, cfg.q
+                ));
+            }
+        }
+        filter_num += 1;
+    }
+
+    out
+}
+
+/// Import standard Equalizer APO format text into EqualiserBandConfigs
+pub fn import_apo_eq(text: &str) -> Vec<EqualiserBandConfig> {
+    let mut results = Vec::new();
+
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        // Standard format example: "Filter 1: ON PK Fc 180 Hz Gain 2.5 dB Q 1.0"
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        if tokens.len() < 4 {
+            continue;
+        }
+
+        let mut band_type = None;
+        let mut freq = None;
+        let mut gain = 0.0_f32;
+        let mut q = 0.7_f32;
+        let mut enabled = true;
+
+        let mut i = 0;
+        while i < tokens.len() {
+            let t = tokens[i].to_uppercase();
+            if t == "OFF" {
+                enabled = false;
+            } else if t == "ON" {
+                enabled = true;
+            } else if t == "PK" || t == "PEAK" || t == "BELL" {
+                band_type = Some(EQBandType::BellBand);
+            } else if t == "HP" || t == "HIGHPASS" || t == "HPQ" {
+                band_type = Some(EQBandType::HighPassFilter);
+            } else if t == "LP" || t == "LOWPASS" || t == "LPQ" {
+                band_type = Some(EQBandType::LowPassFilter);
+            } else if t == "LSC" || t == "LOWSHELF" {
+                band_type = Some(EQBandType::LowShelf);
+            } else if t == "HSC" || t == "HIGHSHELF" {
+                band_type = Some(EQBandType::HighShelf);
+            } else if t == "NO" || t == "NOTCH" {
+                band_type = Some(EQBandType::NotchFilter);
+            } else if t == "FC" && i + 1 < tokens.len() {
+                if let Ok(f) = tokens[i + 1].replace("Hz", "").parse::<f32>() {
+                    freq = Some(f.round() as u32);
+                }
+                i += 1;
+            } else if t == "GAIN" && i + 1 < tokens.len() {
+                if let Ok(g) = tokens[i + 1].replace("dB", "").parse::<f32>() {
+                    gain = g;
+                }
+                i += 1;
+            } else if t == "Q" && i + 1 < tokens.len() {
+                if let Ok(qv) = tokens[i + 1].parse::<f32>() {
+                    q = qv;
+                }
+                i += 1;
+            }
+            i += 1;
+        }
+
+        if let (Some(b_type), Some(f)) = (band_type, freq) {
+            results.push(EqualiserBandConfig {
+                enabled,
+                band_type: b_type,
+                frequency: f.clamp(MIN_FREQUENCY, MAX_FREQUENCY),
+                gain: gain.clamp(MIN_GAIN, MAX_GAIN),
+                q: q.clamp(0.1, 10.0),
+            });
+        }
+    }
+
+    results
 }
 
 #[cfg(test)]
@@ -387,5 +527,61 @@ mod tests {
             "Invalid_Name_Test__"
         );
         assert_eq!(sanitize_filename("Name with spaces"), "Name with spaces");
+    }
+
+    #[test]
+    fn test_apo_export_and_import_roundtrip() {
+        let bands = vec![
+            (
+                EQBand::Band1,
+                EqualiserBandConfig {
+                    enabled: true,
+                    band_type: EQBandType::HighPassFilter,
+                    frequency: 60,
+                    gain: 0.0,
+                    q: 0.7,
+                },
+            ),
+            (
+                EQBand::Band2,
+                EqualiserBandConfig {
+                    enabled: true,
+                    band_type: EQBandType::BellBand,
+                    frequency: 250,
+                    gain: 2.5,
+                    q: 1.2,
+                },
+            ),
+            (
+                EQBand::Band3,
+                EqualiserBandConfig {
+                    enabled: true,
+                    band_type: EQBandType::HighShelf,
+                    frequency: 6500,
+                    gain: 3.0,
+                    q: 0.7,
+                },
+            ),
+        ];
+
+        let exported = export_apo_eq(&bands, "Test Mic");
+        assert!(exported.contains("ON HP Fc 60 Hz"));
+        assert!(exported.contains("ON PK Fc 250 Hz Gain 2.5 dB Q 1.20"));
+        assert!(exported.contains("ON HSC Fc 6500 Hz Gain 3.0 dB Q 0.70"));
+
+        let imported = import_apo_eq(&exported);
+        assert_eq!(imported.len(), 3);
+        assert_eq!(imported[0].band_type, EQBandType::HighPassFilter);
+        assert_eq!(imported[0].frequency, 60);
+
+        assert_eq!(imported[1].band_type, EQBandType::BellBand);
+        assert_eq!(imported[1].frequency, 250);
+        assert!((imported[1].gain - 2.5).abs() < 1e-4);
+        assert!((imported[1].q - 1.2).abs() < 1e-4);
+
+        assert_eq!(imported[2].band_type, EQBandType::HighShelf);
+        assert_eq!(imported[2].frequency, 6500);
+        assert!((imported[2].gain - 3.0).abs() < 1e-4);
+        assert!((imported[2].q - 0.7).abs() < 1e-4);
     }
 }
