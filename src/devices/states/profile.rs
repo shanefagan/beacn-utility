@@ -79,7 +79,21 @@ impl ProfileManager {
             (bool, f32),
             (bool, f32),
         );
-        let default_defs: [FactoryDef<'_>; 8] = [
+        let default_defs: [FactoryDef<'_>; 9] = [
+            (
+                "Default",
+                vec![
+                    (EQBand::Band1, EQBandType::BellBand, 100.0, 0.0, 1.0),
+                    (EQBand::Band2, EQBandType::BellBand, 500.0, 0.0, 1.0),
+                    (EQBand::Band3, EQBandType::BellBand, 2500.0, 0.0, 1.0),
+                    (EQBand::Band4, EQBandType::HighShelf, 10000.0, 0.0, 0.7),
+                ],
+                (false, -18.0, 2.0, 15.0, 100.0, 0.0),
+                (false, -45, 1.5, 10.0, 100.0),
+                (false, 0.0),
+                (false, 0.0),
+                (false, 0.0),
+            ),
             (
                 "Broadcast",
                 vec![
@@ -215,7 +229,13 @@ impl ProfileManager {
                     ));
                 }
 
-                if !mic_eq_file.exists() {
+                let is_outdated_default = name.eq_ignore_ascii_case("Default") && profile_file.exists() && {
+                    fs::read_to_string(&profile_file)
+                        .map(|s| s.contains("HighPassFilter"))
+                        .unwrap_or(false)
+                };
+
+                if !mic_eq_file.exists() || is_outdated_default {
                     let content = export_apo_eq(&apo_bands, name);
                     let _ = fs::write(mic_eq_file, content);
                 }
@@ -223,7 +243,7 @@ impl ProfileManager {
                     let _ = Self::save_snapshots(name, &Snapshots::default());
                 }
 
-                if profile_file.exists() {
+                if profile_file.exists() && !is_outdated_default {
                     continue;
                 }
 
@@ -369,7 +389,16 @@ impl ProfileManager {
         if !list.iter().any(|s| s.eq_ignore_ascii_case("Default")) {
             list.push("Default".to_string());
         }
-        list.sort();
+        list.sort_by(|a, b| {
+            let a_is_default = a.eq_ignore_ascii_case("Default");
+            let b_is_default = b.eq_ignore_ascii_case("Default");
+            match (a_is_default, b_is_default) {
+                (true, true) => std::cmp::Ordering::Equal,
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                (false, false) => a.cmp(b),
+            }
+        });
         list
     }
 
@@ -629,6 +658,7 @@ mod tests {
         ProfileManager::ensure_default_profiles();
         let profiles = ProfileManager::list_profiles();
         assert!(!profiles.is_empty());
+        assert_eq!(profiles[0], "Default");
         assert!(profiles.contains(&"Default".to_string()));
 
         ProfileManager::set_active_profile_name("Broadcast").unwrap();
