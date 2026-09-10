@@ -3,7 +3,7 @@ use beacn_lib::audio::messages::eq_common::EQBand;
 use beacn_lib::audio::messages::eq_common::EQBandType::*;
 
 use crate::ui::widgets::equaliser::eq_common::{
-    Bands, EqGeometry, MAX_GAIN, MIN_GAIN, band_type_has_gain,
+    Bands, EqGeometry, MAX_FREQUENCY, MAX_GAIN, MIN_FREQUENCY, MIN_GAIN, band_type_has_gain,
 };
 use crate::ui::widgets::equaliser::eq_util::{BiquadCoefficient, EQUtil};
 use enum_map::EnumMap;
@@ -49,6 +49,13 @@ fn eq_point_colour(index: usize) -> Color {
     Color::from_rgb8(r, g, b)
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
+pub enum EqVisualizerMode {
+    Static,
+    #[default]
+    BeacnBallistics,
+}
+
 /// Mouse events for the EQ widget
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EQMouseEvent {
@@ -88,6 +95,8 @@ pub struct EQDrawView {
     // Frequency response cache, so we can avoid regenerating when one changes
     band_freq_response: RefCell<EnumMap<EQBand, Option<Vec<f32>>>>,
 
+    visualizer_mode: EqVisualizerMode,
+
     // Spectrum Data points
     spectrum_bins: Vec<f32>,
 }
@@ -112,6 +121,7 @@ impl EQDrawView {
             spectrum_cache: Cache::new(),
             band_freq_response: RefCell::new(Default::default()),
 
+            visualizer_mode: EqVisualizerMode::BeacnBallistics,
             spectrum_bins: vec![],
         }
     }
@@ -162,9 +172,32 @@ impl EQDrawView {
         }
     }
 
+    pub fn visualizer_mode(&self) -> EqVisualizerMode {
+        self.visualizer_mode
+    }
+
+    pub fn set_visualizer_mode(&mut self, mode: EqVisualizerMode) {
+        if self.visualizer_mode != mode {
+            self.visualizer_mode = mode;
+            self.curve_cache.clear();
+        }
+    }
+
+    pub fn cycle_visualizer_mode(&mut self) -> EqVisualizerMode {
+        let next = match self.visualizer_mode {
+            EqVisualizerMode::Static => EqVisualizerMode::BeacnBallistics,
+            EqVisualizerMode::BeacnBallistics => EqVisualizerMode::Static,
+        };
+        self.set_visualizer_mode(next);
+        next
+    }
+
     pub fn set_spectrum(&mut self, data: Vec<f32>) {
         self.spectrum_bins = data;
         self.spectrum_cache.clear();
+        if self.visualizer_mode != EqVisualizerMode::Static {
+            self.curve_cache.clear();
+        }
     }
 
     pub fn clear_spectrum(&mut self) {
@@ -266,15 +299,13 @@ impl EQDrawView {
         }
     }
 
-    fn draw_eq_curve(&self, frame: &mut Frame, plot_rect: Rectangle) {
-        let curve_colour = Color::WHITE;
-
+    pub fn get_summed_frequency_response(&self, plot_rect: Rectangle) -> Vec<f32> {
         let sources: Vec<Vec<f32>> = EQBand::iter()
             .filter(|&band| self.bands[band].enabled)
             .map(|band| self.get_eq_frequency_response(plot_rect, band, EQ_CURVE_RESOLUTION))
             .collect();
 
-        let summed: Vec<f32> = if sources.is_empty() {
+        if sources.is_empty() {
             vec![0.0; EQ_CURVE_RESOLUTION + 1]
         } else {
             let mut result = vec![0.0; sources[0].len()];
@@ -284,10 +315,88 @@ impl EQDrawView {
                 }
             }
             result
+        }
+    }
+
+    pub fn compute_beacn_ballistics(&self, gains: &[f32]) -> Vec<f32> {
+        if gains.is_empty() || self.spectrum_bins.is_empty() {
+            return gains.to_vec();
+        }
+
+        let num_bins = self.spectrum_bins.len();
+        let min_freq = MIN_FREQUENCY as f32;
+        let max_freq = MAX_FREQUENCY as f32;
+        let log_min = min_freq.ln();
+        let log_max = max_freq.ln();
+
+        let freq_to_bin = |f: f32| -> usize {
+            let f = f.clamp(min_freq, max_freq);
+            let t = (f.ln() - log_min) / (log_max - log_min);
+            ((t * (num_bins - 1) as f32).round() as usize).min(num_bins - 1)
         };
 
-        let steps = summed.len() - 1;
-        let points: Vec<Point> = summed
+        let bin_low_start = freq_to_bin(20.0);
+        let bin_low_end = freq_to_bin(200.0);
+        let mut low_max = -120.0_f32;
+        for &db in &self.spectrum_bins[bin_low_start..=bin_low_end] {
+            if db.is_finite() && db > low_max {
+                low_max = db;
+            }
+        }
+
+        let bin_high_start = freq_to_bin(3500.0);
+        let bin_high_end = freq_to_bin(14000.0);
+        let mut high_max = -120.0_f32;
+        for &db in &self.spectrum_bins[bin_high_start..=bin_high_end] {
+            if db.is_finite() && db > high_max {
+                high_max = db;
+            }
+        }
+
+        let low_activity = ((low_max - (-70.0)) / 40.0).clamp(0.0, 1.0);
+        let high_activity = ((high_max - (-70.0)) / 40.0).clamp(0.0, 1.0);
+
+        if low_activity <= 0.001 && high_activity <= 0.001 {
+            return gains.to_vec();
+        }
+
+        let steps = gains.len() - 1;
+        let mut modulated = Vec::with_capacity(gains.len());
+
+        let low_cutoff_freq = 240.0_f32;
+        let high_cutoff_freq = 3000.0_f32;
+
+        let log_low_cutoff = low_cutoff_freq.ln();
+        let log_high_cutoff = high_cutoff_freq.ln();
+
+        for (i, &g_static) in gains.iter().enumerate() {
+            let t = i as f32 / steps as f32;
+            let freq = (log_min + t * (log_max - log_min)).exp();
+
+            let mut delta = 0.0_f32;
+
+            if freq < low_cutoff_freq {
+                let w = (1.0 - (freq.ln() - log_min) / (log_low_cutoff - log_min)).clamp(0.0, 1.0);
+                delta += low_activity * 4.0 * w;
+            }
+
+            if freq > high_cutoff_freq {
+                let w =
+                    ((freq.ln() - log_high_cutoff) / (log_max - log_high_cutoff)).clamp(0.0, 1.0);
+                delta += high_activity * 3.5 * w;
+            }
+
+            modulated.push((g_static + delta).clamp(MIN_GAIN, MAX_GAIN));
+        }
+
+        modulated
+    }
+
+    fn draw_eq_curve(&self, frame: &mut Frame, plot_rect: Rectangle, gains: &[f32]) {
+        let curve_colour = Color::WHITE;
+
+        let steps = gains.len() - 1;
+        let points: Vec<Point> = gains
             .iter()
             .enumerate()
             .map(|(i, &db)| {
@@ -616,8 +725,20 @@ impl canvas::Program<EQMouseEvent> for EQDrawView {
             }
         }
 
+        if !self.spectrum_bins.is_empty() {
+            geometries.push(self.spectrum_cache.draw(renderer, bounds.size(), |frame| {
+                self.draw_spectrum(frame, plot_rect);
+            }));
+        }
+
+        let summed = self.get_summed_frequency_response(plot_rect);
+        let curve_gains = match self.visualizer_mode {
+            EqVisualizerMode::Static => summed,
+            EqVisualizerMode::BeacnBallistics => self.compute_beacn_ballistics(&summed),
+        };
+
         geometries.push(self.curve_cache.draw(renderer, bounds.size(), |frame| {
-            self.draw_eq_curve(frame, plot_rect);
+            self.draw_eq_curve(frame, plot_rect, &curve_gains);
         }));
 
         // Control points + selection ring are cheap and depend on
@@ -625,12 +746,6 @@ impl canvas::Program<EQMouseEvent> for EQDrawView {
         let mut points_frame = Frame::new(renderer, bounds.size());
         self.draw_band_points(&mut points_frame, plot_rect);
         geometries.push(points_frame.into_geometry());
-
-        if !self.spectrum_bins.is_empty() {
-            geometries.push(self.spectrum_cache.draw(renderer, bounds.size(), |frame| {
-                self.draw_spectrum(frame, plot_rect);
-            }));
-        }
 
         geometries
     }
@@ -703,5 +818,44 @@ fn catmull_rom_continue(
         );
 
         builder.bezier_curve_to(control_a, control_b, p2);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_beacn_ballistics_modulates_low_and_high_extremes_only() {
+        let mut view = EQDrawView::default();
+        let steps = 128;
+        let static_gains = vec![0.0_f32; steps + 1];
+
+        view.set_spectrum(vec![-120.0; 128]);
+        let modulated_quiet = view.compute_beacn_ballistics(&static_gains);
+        assert_eq!(modulated_quiet, static_gains);
+
+        let mut bass_spectrum = vec![-120.0; 128];
+        for b in &mut bass_spectrum[0..20] {
+            *b = -20.0;
+        }
+        view.set_spectrum(bass_spectrum);
+        let modulated_bass = view.compute_beacn_ballistics(&static_gains);
+
+        assert!(modulated_bass[0] > 1.0);
+        let mid_idx = steps / 2;
+        assert_eq!(modulated_bass[mid_idx], 0.0);
+        assert_eq!(modulated_bass[steps], 0.0);
+
+        let mut sibilance_spectrum = vec![-120.0; 128];
+        for b in &mut sibilance_spectrum[100..128] {
+            *b = -20.0;
+        }
+        view.set_spectrum(sibilance_spectrum);
+        let modulated_sibilance = view.compute_beacn_ballistics(&static_gains);
+
+        assert_eq!(modulated_sibilance[0], 0.0);
+        assert_eq!(modulated_sibilance[mid_idx], 0.0);
+        assert!(modulated_sibilance[steps] > 1.0);
     }
 }
