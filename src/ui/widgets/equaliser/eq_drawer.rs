@@ -39,7 +39,6 @@ const EQ_COLOURS: [[u8; 3]; 4] = [
     [255, 15, 110],
 ];
 
-/// Vocal frequency guide zone definition (inspired by the BEACN app's vocal frequency zones)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EqGuideZone {
     pub label: &'static str,
@@ -230,13 +229,11 @@ impl EQDrawView {
         self.spectrum_cache.clear();
     }
 
-    /// Whether the frequency guide blocks and labels are shown
     #[allow(dead_code)]
     pub fn show_guide(&self) -> bool {
         self.show_guide
     }
 
-    /// Toggle the frequency guide blocks and labels
     #[allow(dead_code)]
     pub fn set_show_guide(&mut self, show: bool) {
         if self.show_guide != show {
@@ -300,7 +297,6 @@ impl EQDrawView {
                     );
                 }
 
-                // Vertical boundary line between zones
                 if x_start > plot_rect.x + 1.0 && x_start < plot_rect.x + plot_rect.width - 1.0 {
                     frame.stroke(
                         &Path::line(
@@ -314,7 +310,6 @@ impl EQDrawView {
                 }
             }
 
-            // Draw horizontal 0 dB center reference line
             let y_zero = EqGeometry::db_to_y(0.0, plot_rect);
             frame.stroke(
                 &Path::line(
@@ -326,7 +321,6 @@ impl EQDrawView {
                     .with_width(1.0),
             );
 
-            // Draw subtle guide labels centered in each frequency zone
             for zone in &EQ_GUIDE_ZONES {
                 let x_start = EqGeometry::freq_to_x(zone.min_freq, plot_rect);
                 let x_end = EqGeometry::freq_to_x(zone.max_freq, plot_rect);
